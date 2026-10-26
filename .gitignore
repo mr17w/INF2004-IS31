@@ -1,0 +1,17 @@
+# Build output
+build/
+build_*/
+*.o
+*.elf
+*.uf2
+*.map
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.log
