@@ -19,7 +19,7 @@
 #define ESP_TASK_STACK_SIZE   3072
 #define ESP_QUEUE_COUNT       2
 #define ESP_LINE_SIZE         128
-#define ESP_LINE_TIMEOUT_MS   8000
+#define ESP_LINE_TIMEOUT_MS   20000
 
 #define PING_INTERVAL_MS      500U
 #define LOST_AFTER_MS         1500U
@@ -268,9 +268,17 @@ static void esp_uart_drain(void)
 static BOOL esp_read_line(char *buffer, INT size, INT timeout_ms)
 {
     INT count = 0;
-    INT waited = 0;
+    UW start = now_ms();
 
-    while (waited < timeout_ms) {
+    /*
+     * Do not use tk_dly_tsk(1) here.
+     *
+     * This uT-Kernel build has a 10 ms system-timer period, while UART1 at
+     * 115200 baud can fill the RP2040 FIFO in only a few milliseconds.
+     * Poll quickly while waiting for the ESP32 reply so AP lines and END are
+     * not lost when the ESP sends the whole scan result as one burst.
+     */
+    while ((UW)(now_ms() - start) < (UW)timeout_ms) {
         while (esp_uart_readable()) {
             char c = (char)(in_w(UART_DR) & 0xFFU);
 
@@ -284,8 +292,11 @@ static BOOL esp_read_line(char *buffer, INT size, INT timeout_ms)
             }
         }
 
-        tk_dly_tsk(1);
-        waited++;
+        /*
+         * 100 us is short enough to keep up with 115200 baud but still avoids
+         * hammering the peripheral continuously.
+         */
+        WaitUsec(100U);
     }
 
     buffer[count] = '\0';
@@ -422,8 +433,11 @@ static void run_scan(void)
         }
 
         if (starts_with(line, "AP,")) {
-            tm_printf((UB *)"[esp] %s\n", line);
-
+            /*
+             * Do not print here. The ESP32 sends AP lines back-to-back and
+             * slow USB debug output can make UART1 overflow before END arrives.
+             * Store everything first, then print after the full reply is safe.
+             */
             if (result.count < WIFI_MAX_APS) {
                 if (parse_ap_line(
                         line,
@@ -447,6 +461,23 @@ static void run_scan(void)
                 result.count,
                 result.scan_ms
             );
+
+            /*
+             * UART reception is finished now, so it is safe to print the
+             * buffered APs without risking loss of the END line.
+             */
+            {
+                int i;
+
+                for (i = 0; i < result.count; i++) {
+                    tm_printf(
+                        (UB *)"[esp] AP,%s,%d,%d\n",
+                        result.aps[i].ssid,
+                        result.aps[i].rssi,
+                        result.aps[i].channel
+                    );
+                }
+            }
 
             break;
         }
