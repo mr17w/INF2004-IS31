@@ -7,7 +7,7 @@ const int LED_PIN = 8;
 const int MAX_APS = 10;
 
 // ---- NFR13: only report networks we are authorised to monitor ----
-const bool FILTER_ENABLED = true;          // false = report everything (debugging only)
+const bool FILTER_ENABLED = false;          // false = report everything (debugging only)
 const char *ALLOWED_SSIDS[] = {
   "air justins"                    // <-- change these to your real network name
 };
