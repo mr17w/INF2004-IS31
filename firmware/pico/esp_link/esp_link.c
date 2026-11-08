@@ -377,11 +377,17 @@ static BOOL esp_alive_check(void)
 static void run_scan(void)
 {
     char line[ESP_LINE_SIZE];
+    INT line_len = 0;
+    INT idle_polls = 0;
     WifiScanResult result;
     BOOL finished = FALSE;
     ER er;
     UW scan_start;
+    UW scan_end;
     UW now;
+
+    /* 15 seconds with no UART activity, at 100 us per idle poll */
+    const INT max_idle_polls = 150000;
 
     clear_scan_result(&result);
 
@@ -412,144 +418,135 @@ static void run_scan(void)
     }
 
     scan_start = now_ms();
-
-    /*
-     * Do not use the normal 1.5 second heartbeat-loss rule while a scan is
-     * active. A Wi-Fi scan can legitimately take longer than that.
-     */
     esp_uart_write("SCAN\n");
 
-    while ((UW)(now_ms() - scan_start) < ESP_LINE_TIMEOUT_MS) {
-        if (!esp_read_line(line, ESP_LINE_SIZE, 100)) {
-            continue;
-        }
+    /*
+     * Keep one continuous UART drain loop active for the whole scan.
+     * The ESP32 sends AP lines and END close together after scanning.
+     */
+    while (!finished && idle_polls < max_idle_polls) {
+        BOOL received_byte = FALSE;
 
-        now = now_ms();
+        while (esp_uart_readable()) {
+            char c = (char)(in_w(UART_DR) & 0xFFU);
 
-        /* any proper ESP reply proves the link is still alive */
-        if (line[0] != '\0') {
+            received_byte = TRUE;
+            idle_polls = 0;
+
+            if (c == '\r') {
+                continue;
+            }
+
+            if (c != '\n') {
+                if (line_len < ESP_LINE_SIZE - 1) {
+                    line[line_len++] = c;
+                }
+                continue;
+            }
+
+            line[line_len] = '\0';
+            line_len = 0;
+
+            if (line[0] == '\0') {
+                continue;
+            }
+
+            now = now_ms();
             last_pong_ms = now;
             set_link_status(ESP_STATUS_OK);
-        }
 
-        if (starts_with(line, "AP,")) {
-            /*
-             * Do not print here. The ESP32 sends AP lines back-to-back and
-             * slow USB debug output can make UART1 overflow before END arrives.
-             * Store everything first, then print after the full reply is safe.
-             */
-            if (result.count < WIFI_MAX_APS) {
-                if (parse_ap_line(
-                        line,
-                        &result.aps[result.count]
-                    )) {
-                    result.count++;
+            if (starts_with(line, "AP,")) {
+                if (result.count < WIFI_MAX_APS) {
+                    if (parse_ap_line(
+                            line,
+                            &result.aps[result.count]
+                        )) {
+                        result.count++;
+                    }
                 }
+                continue;
             }
 
-            continue;
-        }
-
-        if (starts_with(line, "END")) {
-            result.success = 1;
-            result.error = WIFI_SCAN_ERROR_NONE;
-            result.scan_ms = (int)(now - scan_start);
-            finished = TRUE;
-
-            tm_printf(
-                (UB *)"[esp] scan complete: %d APs in %d ms\n",
-                result.count,
-                result.scan_ms
-            );
-
-            /*
-             * UART reception is finished now, so it is safe to print the
-             * buffered APs without risking loss of the END line.
-             */
-            {
-                int i;
-
-                for (i = 0; i < result.count; i++) {
-                    tm_printf(
-                        (UB *)"[esp] AP,%s,%d,%d\n",
-                        result.aps[i].ssid,
-                        result.aps[i].rssi,
-                        result.aps[i].channel
-                    );
-                }
+            if (starts_with(line, "END")) {
+                result.success = 1;
+                result.error = WIFI_SCAN_ERROR_NONE;
+                finished = TRUE;
+                break;
             }
 
-            break;
+            if (starts_with(line, "ERR,BUSY")) {
+                result.error = WIFI_SCAN_ERROR_BUSY;
+                finished = TRUE;
+                break;
+            }
+
+            if (starts_with(line, "ERR,SCAN_FAILED")) {
+                result.error = WIFI_SCAN_ERROR_SCAN_FAILED;
+                finished = TRUE;
+                break;
+            }
+
+            if (starts_with(line, "ERR")) {
+                result.error = WIFI_SCAN_ERROR_PROTOCOL;
+                finished = TRUE;
+                break;
+            }
+
+            if (same_text(line, "PONG") ||
+                same_text(line, "READY")) {
+                continue;
+            }
         }
 
-        if (starts_with(line, "ERR,BUSY")) {
-            result.error = WIFI_SCAN_ERROR_BUSY;
-            result.scan_ms = (int)(now - scan_start);
-            finished = TRUE;
-
-            tm_printf((UB *)"[esp] ERR,BUSY\n");
-
-            break;
-        }
-
-        if (starts_with(line, "ERR,SCAN_FAILED")) {
-            result.error = WIFI_SCAN_ERROR_SCAN_FAILED;
-            result.scan_ms = (int)(now - scan_start);
-            finished = TRUE;
-
-            tm_printf((UB *)"[esp] ERR,SCAN_FAILED\n");
-
-            break;
-        }
-
-        if (starts_with(line, "ERR")) {
-            result.error = WIFI_SCAN_ERROR_PROTOCOL;
-            result.scan_ms = (int)(now - scan_start);
-            finished = TRUE;
-
-            tm_printf((UB *)"[esp] %s\n", line);
-
-            break;
-        }
-
-        if (same_text(line, "PONG") ||
-            same_text(line, "READY")) {
-            continue;
-        }
-
-        if (line[0] != '\0') {
-            tm_printf((UB *)"[esp] %s\n", line);
+        if (!received_byte && !finished) {
+            WaitUsec(100U);
+            idle_polls++;
         }
     }
 
-    /*
-     * If the whole scan times out, only then check whether the ESP32 itself
-     * disappeared or whether this was just a scan timeout.
-     */
+    scan_end = now_ms();
+    result.scan_ms = (int)(scan_end - scan_start);
+
     if (!finished) {
-        now = now_ms();
-        result.scan_ms = (int)(now - scan_start);
+        result.error = WIFI_SCAN_ERROR_TIMEOUT;
 
         tm_printf(
-            (UB *)"[esp] scan timed out after %d ms\n",
+            (UB *)"[esp] scan timed out after %d ms (no END)\n",
             result.scan_ms
         );
 
-        if (esp_alive_check()) {
-            result.error = WIFI_SCAN_ERROR_TIMEOUT;
-        } else {
+        if (!esp_alive_check()) {
             result.error = WIFI_SCAN_ERROR_ESP_LOST;
         }
     }
 
-    /* restart the normal idle heartbeat timing after the scan */
-    now = now_ms();
-    last_ping_ms = now;
-
+    /*
+     * Reception is complete now, so slower USB printing cannot make us
+     * lose END or any remaining AP line.
+     */
     if (result.success) {
-        last_pong_ms = now;
+        int i;
+
+        tm_printf(
+            (UB *)"[esp] scan complete: %d APs in %d ms\n",
+            result.count,
+            result.scan_ms
+        );
+
+        for (i = 0; i < result.count; i++) {
+            tm_printf(
+                (UB *)"[esp] AP,%s,%d,%d\n",
+                result.aps[i].ssid,
+                result.aps[i].rssi,
+                result.aps[i].channel
+            );
+        }
+
+        last_pong_ms = scan_end;
         set_link_status(ESP_STATUS_OK);
     }
+
+    last_ping_ms = scan_end;
 
     tm_printf(
         (UB *)"[esp] result -> success=%d count=%d error=%d scan_ms=%d\n",
