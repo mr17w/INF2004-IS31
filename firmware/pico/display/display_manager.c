@@ -33,8 +33,6 @@ static void copy_result(WifiScanResult *dest, const WifiScanResult *src)
 
     dest->success = src->success;
     dest->count = src->count;
-    dest->scan_ms = src->scan_ms;
-    dest->error = src->error;
 
     for (i = 0; i < WIFI_MAX_APS; i++) {
         dest->aps[i].rssi = src->aps[i].rssi;
@@ -230,40 +228,6 @@ static void show_wifi_screen(void)
     show_status_screen("WIFI SCAN", "SCANNING...");
 }
 
-static UW display_now_ms(void)
-{
-    SYSTIM time;
-
-    if (tk_get_otm(&time) < E_OK) {
-        return 0U;
-    }
-
-    return time.lo;
-}
-
-static const char *wifi_error_text(WifiScanError error)
-{
-    switch (error) {
-        case WIFI_SCAN_ERROR_ESP_LOST:
-            return "ESP32 LOST";
-
-        case WIFI_SCAN_ERROR_BUSY:
-            return "ESP32 BUSY";
-
-        case WIFI_SCAN_ERROR_SCAN_FAILED:
-            return "SCAN FAILED";
-
-        case WIFI_SCAN_ERROR_TIMEOUT:
-            return "SCAN TIMEOUT";
-
-        case WIFI_SCAN_ERROR_PROTOCOL:
-            return "ESP32 ERROR";
-
-        default:
-            return "SCAN FAILED";
-    }
-}
-
 static void show_wifi_results(const WifiScanResult *result)
 {
     int i;
@@ -272,7 +236,6 @@ static void show_wifi_results(const WifiScanResult *result)
     char rssi[12];
     char channel[12];
     char count[12];
-    char scan_ms[12];
 
     st7789_fill(ST7789_BLACK);
 
@@ -289,7 +252,9 @@ static void show_wifi_results(const WifiScanResult *result)
         st7789_draw_text(
             18U,
             130U,
-            wifi_error_text(result->error),
+            current_esp_status == ESP_STATUS_LOST
+                ? "ESP32 LOST"
+                : "SCAN FAILED",
             ST7789_RED,
             ST7789_BLACK,
             2U
@@ -390,38 +355,9 @@ static void show_wifi_results(const WifiScanResult *result)
         2U
     );
 
-    int_to_text(result->scan_ms, scan_ms);
-
     st7789_draw_text(
         0U,
-        278U,
-        "SCAN",
-        ST7789_WHITE,
-        ST7789_BLACK,
-        1U
-    );
-
-    st7789_draw_text(
-        35U,
-        278U,
-        scan_ms,
-        ST7789_WHITE,
-        ST7789_BLACK,
-        1U
-    );
-
-    st7789_draw_text(
-        78U,
-        278U,
-        "MS",
-        ST7789_WHITE,
-        ST7789_BLACK,
-        1U
-    );
-
-    st7789_draw_text(
-        0U,
-        302U,
+        292U,
         "KO = MENU",
         ST7789_WHITE,
         ST7789_BLACK,
@@ -483,26 +419,7 @@ static void display_task(INT stacd, void *exinf)
 
             case DISPLAY_EVENT_WIFI_RESULTS:
                 if (wifi_screen_active) {
-                    UW draw_start = display_now_ms();
-                    UW draw_ms;
-
-                    tm_printf(
-                        (UB *)"[display] result <- success=%d count=%d error=%d scan_ms=%d\n",
-                        message.wifi_result.success,
-                        message.wifi_result.count,
-                        message.wifi_result.error,
-                        message.wifi_result.scan_ms
-                    );
-
                     show_wifi_results(&message.wifi_result);
-
-                    draw_ms = display_now_ms() - draw_start;
-
-                    tm_printf(
-                        (UB *)"[display] wifi screen updated in %u ms%s\n",
-                        draw_ms,
-                        draw_ms <= 500U ? "" : " (OVER 500 MS)"
-                    );
                 }
                 break;
 

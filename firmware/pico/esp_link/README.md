@@ -6,21 +6,26 @@ The final Pico application reuses Justin's existing ESP32-C3 protocol:
 
 - Pico sends `PING`
 - ESP32 replies `PONG`
-- ESP32 sends `READY` after startup
 - Pico sends `SCAN`
 - ESP32 replies with `AP,<ssid>,<rssi>,<channel>`
 - the scan ends with `END,<count>`
-- scan errors include `ERR,BUSY` and `ERR,SCAN_FAILED`
+- errors use `ERR,...`
 
-Current uT-Kernel integration:
+Hardware:
+- Pico GP8 TX -> ESP32 RX
+- Pico GP9 RX <- ESP32 TX
+- common GND
+- UART1 at 115200 baud
+
+uT-Kernel integration:
 - one ESP Link Task owns UART1 on processor 2
 - idle heartbeat sends PING every 500 ms
-- no PONG for 1500 ms marks the ESP32 as lost
-- heartbeat continues while the ESP32 performs its asynchronous passive scan
-- AP results are buffered completely before LCD drawing
-- scan duration is recorded
-- BUSY, SCAN_FAILED, timeout and lost-link failures are kept separate
-- completed scan results are sent to the Display Task
+- PONG marks the ESP32 link as OK
+- no PONG for 1500 ms marks the ESP32 link as LOST
+- Wi-Fi scans temporarily use the same task, so heartbeat and scan parsing never
+  compete to read UART1
+- the whole scan result is received before any LCD result drawing
+- completed results and link-state changes are sent to the Display Task
 
-Keeping one UART1 owner prevents heartbeat and scan parsing from stealing bytes
-from one another.
+This keeps the Display Task as the only LCD owner and avoids two tasks racing to
+consume the same UART bytes.
